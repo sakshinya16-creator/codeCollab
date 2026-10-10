@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CodeTogether — Room</title>
+
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"></script>
+
+    <style>
+        body { font-family: sans-serif; margin: 0; background: #1e1e2e; color: white; }
+        #topbar {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 15px; border-bottom: 1px solid #313244;
+        }
+        #roomInfo { font-size: 14px; color: #a6adc8; }
+        #roomInfo b { color: #89b4fa; cursor: pointer; }
+        #userList { display: flex; gap: 6px; }
+        .user-chip {
+            padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: bold; color: #1e1e2e;
+        }
+        .CodeMirror { height: calc(100vh - 50px); font-size: 15px; }
+        .remote-cursor { border-left: 2px solid; margin-left: -1px; }
+        .remote-cursor-label {
+            position: relative; top: -1.2em; font-size: 10px; padding: 1px 4px;
+            border-radius: 3px; color: #1e1e2e; white-space: nowrap;
+        }
+    </style>
+</head>
+<body>
+    <div id="topbar">
+        <div id="roomInfo">Room: <b onclick="copyRoomLink()" title="Click to copy link">loading...</b></div>
+        <div id="userList"></div>
+    </div>
+    <textarea id="editorArea"></textarea>
+
+    <script type="module">
+        // Only Yjs + y-websocket are loaded as modules — CodeMirror stays as
+        // the classic global (window.CodeMirror) loaded above via <script>.
+        // We deliberately do NOT use a pre-built "CodeMirror-Yjs binding"
+        // library here: those bundle their own internal copy of CodeMirror,
+        // which conflicts with our global one (a duplicate-module problem,
+        // same root cause as the "Yjs was already imported" error we saw
+        // earlier). Instead, we write the small bridge ourselves below —
+        // it's about 20 lines and gives us full control.
+        import * as Y from "https://esm.sh/yjs@13.6.18";
+        import { WebsocketProvider } from "https://esm.sh/y-websocket@1.5.4?deps=yjs@13.6.18";
+
+        const roomId = window.location.pathname.split("/room/")[1];
+        document.querySelector("#roomInfo b").textContent = roomId;
+
+        const COLORS = ["#f38ba8", "#a6e3a1", "#89b4fa", "#f9e2af", "#cba6f7", "#fab387"];
+        const myName = "User-" + Math.floor(Math.random() * 900 + 100);
+        const myColor = COLORS[Math.floor(Math.random() * COLORS.length)];
+
+        const editor = CodeMirror.fromTextArea(document.getElementById("editorArea"), {
+            mode: "python",
+            theme: "dracula",
+            lineNumbers: true,
+        });
+
+        // ---- The actual CRDT document ----
+        const ydoc = new Y.Doc();
+        const provider = new WebsocketProvider(
+            "ws://" + window.location.host + "/sync",
+            roomId,
+            ydoc
+        );
+        const ytext = ydoc.getText("codemirror");
+
+        provider.awareness.setLocalStateField("user", { name: myName, color: myColor });
+
+        let applyingRemoteChange = false;
+
+        // ---- REMOTE -> EDITOR ----
+        // Whenever the shared Y.Text changes (because of our own edit OR
+        // someone else's), refresh the editor to match it. We guard with
+        // applyingRemoteChange so this doesn't loop back and re-send the
+        // update we just received.
+        ytext.observe(() => {
+            const newText = ytext.toString();
+            if (editor.getValue() === newText) return; // nothing to do
+
+            applyingRemoteChange = true;
+            const cursor = editor.getCursor();
+            editor.setValue(newText);
+            editor.setCursor(cursor);
+            applyingRemoteChange = false;
+        });
+
+        // Once the initial sync with the server completes, load whatever
+        // content already exists in the room.
+        provider.on("sync", (isSynced) => {
+            if (isSynced) editor.setValue(ytext.toString());
+        });
+
+        // ---- EDITOR -> Y.TEXT (the hand-written bridge) ----
+        // On every local edit, figure out exactly what changed by comparing
+        // old vs new text, then apply ONLY that change to the Y.Text — not
+        // a full replace. This matters: a full delete+insert of the whole
+        // document on every keystroke would defeat the purpose of using a
+        // CRDT, since Yjs merges based on small, precise operations.
+        editor.on("change", () => {
+            if (applyingRemoteChange) return;
+
+            const oldText = ytext.toString();
+            const newText = editor.getValue();
+            if (oldText === newText) return;
+
+            // Find how many characters match at the start (common prefix)
+            // and at the end (common suffix) of the old and new text.
+            // Whatever's left in between is the actual edit.
+            let prefixLen = 0;
+            const maxPrefix = Math.min(oldText.length, newText.length);
+            while (prefixLen < maxPrefix && oldText[prefixLen] === newText[prefixLen]) {
+                prefixLen++;
+            }
+
+            let suffixLen = 0;
+            const maxSuffix = Math.min(oldText.length, newText.length) - prefixLen;
+            while (
+                suffixLen < maxSuffix &&
+                oldText[oldText.length - 1 - suffixLen] === newText[newText.length - 1 - suffixLen]
+            ) {
+                suffixLen++;
+            }
+
+            const deleteLength = oldText.length - prefixLen - suffixLen;
+            const insertText = newText.slice(prefixLen, newText.length - suffixLen);
+
+            ydoc.transact(() => {
+                if (deleteLength > 0) ytext.delete(prefixLen, deleteLength);
+                if (insertText.length > 0) ytext.insert(prefixLen, insertText);
+            });
+        });
+
+        // ---- Live cursors (via Yjs awareness) ----
+        const remoteCursorMarks = {};
+
+        editor.on("cursorActivity", () => {
+            const cursor = editor.getCursor();
+            provider.awareness.setLocalStateField("cursor", { line: cursor.line, ch: cursor.ch });
+        });
+
+        provider.awareness.on("change", () => {
+            renderUserList();
+            renderRemoteCursors();
+        });
+
+        function renderUserList() {
+            const states = Array.from(provider.awareness.getStates().values());
+            const el = document.getElementById("userList");
+            el.innerHTML = "";
+            states.forEach((s) => {
+                if (!s.user) return;
+                const chip = document.createElement("div");
+                chip.className = "user-chip";
+                chip.style.background = s.user.color;
+                chip.textContent = s.user.name === myName ? s.user.name + " (you)" : s.user.name;
+                el.appendChild(chip);
+            });
+        }
+
+        function renderRemoteCursors() {
+            const myClientId = ydoc.clientID;
+            provider.awareness.getStates().forEach((state, clientId) => {
+                if (clientId === myClientId || !state.user || !state.cursor) return;
+
+                if (remoteCursorMarks[clientId]) remoteCursorMarks[clientId].clear();
+
+                const cursorEl = document.createElement("span");
+                cursorEl.className = "remote-cursor";
+                cursorEl.style.borderColor = state.user.color;
+                cursorEl.style.height = "1.2em";
+                cursorEl.style.display = "inline-block";
+
+                const label = document.createElement("span");
+                label.className = "remote-cursor-label";
+                label.style.background = state.user.color;
+                label.textContent = state.user.name;
+                cursorEl.appendChild(label);
+
+                remoteCursorMarks[clientId] = editor.setBookmark(state.cursor, { widget: cursorEl });
+            });
+        }
+
+        window.copyRoomLink = function () {
+            navigator.clipboard.writeText(window.location.href);
+            alert("Room link copied! Share it with your teammate.");
+        };
+    </script>
+</body>
+</html>

@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>CodeTogether</title>
+    <style>
+        body {
+            font-family: -apple-system, sans-serif;
+            background: #1e1e2e;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        h1 { margin-bottom: 5px; }
+        p { color: #a6adc8; margin-top: 0; }
+        button, input {
+            padding: 12px 20px;
+            font-size: 15px;
+            border-radius: 8px;
+            border: none;
+            margin: 8px;
+        }
+        button {
+            background: #89b4fa;
+            color: #1e1e2e;
+            font-weight: bold;
+            cursor: pointer;
+        }
+        input {
+            background: #313244;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+    <h1>CodeTogether</h1>
+    <p>Real-time collaborative code editor — powered by CRDTs (Yjs)</p>
+
+    <button onclick="createRoom()">Create New Room</button>
+
+    <div>
+        <input type="text" id="roomCode" placeholder="Enter room code" />
+        <button onclick="joinRoom()">Join Room</button>
+    </div>
+
+    <script>
+        function generateRoomId() {
+            return Math.random().toString(36).substring(2, 8);
+        }
+
+        function createRoom() {
+            const roomId = generateRoomId();
+            window.location.href = "/room/" + roomId;
+        }
+
+        function joinRoom() {
+            const code = document.getElementById("roomCode").value.trim();
+            if (code) {
+                window.location.href = "/room/" + code;
+            }
+        }
+    </script>
+</body>
+</html>
